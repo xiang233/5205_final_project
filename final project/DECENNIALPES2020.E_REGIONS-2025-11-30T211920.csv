@@ -1,0 +1,6 @@
+﻿"Geographic Area Name (NAME)","Census Count (E_REGIONS_001)","Net Coverage Error (%) (E_REGIONS_002)","Standard Error (%) (E_REGIONS_003)"
+"United States","323,200,000","−0.24","0.25"
+"Northeast Region","55,910,000","1.71","0.48"
+"Midwest Region","67,260,000","0.04","0.32"
+"South Region","123,200,000","−1.85","0.37"
+"West Region","76,800,000","0.75","0.49"
