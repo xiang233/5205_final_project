@@ -1,7 +1,7 @@
 method,avg_flips,std_flips,p_any_change,avg_expected_flips,std_expected_flips
-Hamilton,0.5185,0.49965763278468994,0.5185,,
-Jefferson,1.3515,0.737528135056555,0.904,,
-Webster,0.334,0.48212446525767605,0.329,,
-HuntingtonHill,0.6565,0.503495531261202,0.6425,,
-Rand_systematic_intrinsic_vsHH,16.7385,1.6718605653582477,1.0,,
-Rand_systematic_noise_on_mean,,,1.0,0.845935,0.14892103872522502
+Hamilton,0.5055,0.4999697490848822,0.5055,,
+Jefferson,1.3435,0.7242290728768074,0.8995,,
+Webster,0.364,0.49346124467885016,0.358,,
+HuntingtonHill,0.6665,0.5022725853558007,0.6515,,
+Rand_systematic_intrinsic_vsHH,16.7175,1.6585215554824724,1.0,,
+Rand_systematic_noise_on_mean,,,1.0,0.9368400000000008,0.1902795033628164
