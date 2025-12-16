@@ -4,7 +4,7 @@
 """
 Apportionment Project (US House, 2020 Census)
 - Deterministic methods: Hamilton, Jefferson, Webster, Huntington–Hill (HH)
-- Randomized quota rounding: systematic / sampford
+- Randomized quota rounding: systematic / Sampford / independent / Thompson-style
 - Metrics
 - Randomized summary (mean/std/p_change)
 - Sensitivity:
@@ -16,7 +16,7 @@ Apportionment Project (US House, 2020 Census)
 Plus: PPT-friendly plots (PDF+PNG, 16:9-ish) saved to outputs/figs/
 
 Usage example:
-  python apportionment_project.py --xlsx apportionment-2020-table01.xlsx --eps 0.005 --R 2000 --seed 0
+  python Apportionment.py --xlsx apportionment-2020-table01.xlsx --eps 0.005 --R 2000 --seed 0
 """
 
 import argparse
@@ -56,7 +56,7 @@ def load_us_2020_from_xlsx(xlsx_path: str) -> pd.DataFrame:
         raise ValueError("Could not find a header cell exactly 'STATE' in the first column.")
     start_idx = idx_list[0]
 
-    df = df_raw.iloc[start_idx + 1 :].copy()
+    df = df_raw.iloc[start_idx + 1:].copy()
     cols = list(df.columns)
     if len(cols) < 3:
         raise ValueError("Unexpected table shape; need at least 3 columns after header row.")
@@ -216,6 +216,55 @@ def sampford_rounding(p: np.ndarray, k: int, rng: np.random.Generator, max_tries
     return systematic_rounding(p, k, rng)
 
 
+def independent_rounding(p: np.ndarray, k: int, rng: np.random.Generator, max_tries: int = 2000) -> np.ndarray:
+    """
+    Simple i.i.d. Bernoulli rounding with rejection:
+      - Sample x_i ~ Bernoulli(p_i) independently until sum(x) = k,
+        or fall back to greedy top-k by p_i.
+    This preserves E[sum x_i] = k and approximately preserves marginals.
+    """
+    n = len(p)
+    if k == 0:
+        return np.zeros(n, dtype=int)
+    if not np.isclose(p.sum(), k, atol=1e-9):
+        raise ValueError(f"independent_rounding expects sum(p)=k; got sum={p.sum()}, k={k}")
+
+    for _ in range(max_tries):
+        x = rng.binomial(1, p, size=n).astype(int)
+        s = int(x.sum())
+        if s == k:
+            return x
+
+    # Greedy fallback: choose top-k probabilities
+    idx = np.argsort(-p)
+    x = np.zeros(n, dtype=int)
+    x[idx[:k]] = 1
+    return x
+
+
+def thompson_rounding(p: np.ndarray, k: int, rng: np.random.Generator, prior_strength: float = 20.0) -> np.ndarray:
+    """
+    Thompson-style rounding:
+      - For each i, sample a Beta score with mean ~ p_i
+      - Give k 'successes' to the k largest scores.
+    This is a heuristic 'Thompson sampling' style rule; it preserves total = k,
+    and states with larger p_i are more likely to receive an extra seat.
+    """
+    n = len(p)
+    if k == 0:
+        return np.zeros(n, dtype=int)
+    if not np.isclose(p.sum(), k, atol=1e-9):
+        raise ValueError(f"thompson_rounding expects sum(p)=k; got sum={p.sum()}, k={k}")
+
+    alpha = p * prior_strength + 1.0
+    beta = (1.0 - p) * prior_strength + 1.0
+    scores = rng.beta(alpha, beta)
+    idx = np.argsort(-scores)
+    x = np.zeros(n, dtype=int)
+    x[idx[:k]] = 1
+    return x
+
+
 def apportion_randomized_quota(
     pop: np.ndarray,
     house_size: int,
@@ -229,6 +278,8 @@ def apportion_randomized_quota(
       2) compute remaining quotas q
       3) give floors
       4) distribute leftover seats by randomized rounding of residues
+
+    rounding ∈ {"systematic", "sampford", "independent", "thompson"}
     """
     n = len(pop)
     seats = np.full(n, min_seat, dtype=int)
@@ -257,8 +308,12 @@ def apportion_randomized_quota(
         x = systematic_rounding(residues, k, rng)
     elif rounding == "sampford":
         x = sampford_rounding(residues, k, rng)
+    elif rounding == "independent":
+        x = independent_rounding(residues, k, rng)
+    elif rounding == "thompson":
+        x = thompson_rounding(residues, k, rng)
     else:
-        raise ValueError("rounding must be 'systematic' or 'sampford'.")
+        raise ValueError("rounding must be 'systematic', 'sampford', 'independent', or 'thompson'.")
 
     seats += x
     return seats
@@ -432,7 +487,7 @@ def sensitivity_randomized_expected(
         mu2 = expected_seats(
             pop2, house_size, rounding,
             draws=inner_draws, min_seat=min_seat,
-            seed=seed + 100000 + t,  # change seed per outer trial
+            seed=seed + 100000 + t,
             desc=f"{desc} inner[{t}]"
         )
         d = np.abs(mu2 - mu0)
@@ -577,8 +632,8 @@ def main():
     parser.add_argument("--eps", type=float, default=0.005, help="±eps noise (0.005 = 0.5%)")
     parser.add_argument("--R", type=int, default=2000, help="number of perturbation trials")
 
-    parser.add_argument("--rand_draws", type=int, default=5000, help="draws for systematic randomized summary")
-    parser.add_argument("--sampford_draws", type=int, default=300, help="draws for sampford summary (slow)")
+    parser.add_argument("--rand_draws", type=int, default=5000, help="draws for randomized summaries")
+    parser.add_argument("--sampford_draws", type=int, default=300, help="draws for Sampford summary (slow)")
 
     parser.add_argument("--intrinsic_draws", type=int, default=2000, help="draws for intrinsic randomness stats")
     parser.add_argument("--rand_inner", type=int, default=200, help="inner draws for expected seats under randomized method")
@@ -613,6 +668,8 @@ def main():
     rng_one = make_rng(args.seed, 999)
     sys_one = apportion_randomized_quota(pop, args.house_size, rounding="systematic", rng=rng_one, min_seat=args.min_seat)
     samp_one = apportion_randomized_quota(pop, args.house_size, rounding="sampford", rng=rng_one, min_seat=args.min_seat)
+    indep_one = apportion_randomized_quota(pop, args.house_size, rounding="independent", rng=rng_one, min_seat=args.min_seat)
+    thomp_one = apportion_randomized_quota(pop, args.house_size, rounding="thompson", rng=rng_one, min_seat=args.min_seat)
 
     out = pd.DataFrame({
         "State": states,
@@ -624,6 +681,8 @@ def main():
         "HuntingtonHill": hh,
         "Rand_Systematic(one)": sys_one,
         "Rand_Sampford(one)": samp_one,
+        "Rand_Independent(one)": indep_one,
+        "Rand_Thompson(one)": thomp_one,
     })
 
     for m in ["Hamilton", "Jefferson", "Webster", "HuntingtonHill"]:
@@ -643,6 +702,8 @@ def main():
         "Hamilton": ham,
         "Rand_Systematic(one)": sys_one,
         "Rand_Sampford(one)": samp_one,
+        "Rand_Independent(one)": indep_one,
+        "Rand_Thompson(one)": thomp_one,
     }
 
     metrics_rows = []
@@ -685,7 +746,18 @@ def main():
     print(f"[Randomized summary] sampford draws = {args.sampford_draws}")
     samp_stats = draw_many("sampford", args.sampford_draws, seed_key=2)
 
-    rand_stats = sys_stats.merge(samp_stats, on="State", how="left")
+    print(f"[Randomized summary] independent draws = {args.rand_draws}")
+    indep_stats = draw_many("independent", args.rand_draws, seed_key=3)
+
+    print(f"[Randomized summary] thompson draws = {args.rand_draws}")
+    thomp_stats = draw_many("thompson", args.rand_draws, seed_key=4)
+
+    rand_stats = (
+        sys_stats
+        .merge(samp_stats, on="State", how="left")
+        .merge(indep_stats, on="State", how="left")
+        .merge(thomp_stats, on="State", how="left")
+    )
     rand_path = os.path.join(args.outdir, "randomized_summary.csv")
     rand_stats.to_csv(rand_path, index=False)
     print("Saved randomized draw summary to:", rand_path)
@@ -710,7 +782,7 @@ def main():
         sens_rows.append({"method": name, **s})
         flip_samples[f"det_{name}"] = flips
 
-    # Randomized: (A) intrinsic randomness vs HH
+    # Randomized: (A) intrinsic randomness vs HH (systematic)
     s_intr, flips_intr = intrinsic_randomness_vs_reference(
         pop, hh, args.house_size, rounding="systematic",
         draws=args.intrinsic_draws, min_seat=args.min_seat, seed=args.seed,
@@ -719,7 +791,7 @@ def main():
     sens_rows.append({"method": "Rand_systematic_intrinsic_vsHH", **s_intr})
     flip_samples["rand_systematic_intrinsic_vsHH"] = flips_intr
 
-    # Randomized: (B) noise sensitivity of EXPECTED seats
+    # Randomized: (B) noise sensitivity of EXPECTED seats (systematic)
     s_exp, flips_exp = sensitivity_randomized_expected(
         pop, args.house_size, rounding="systematic",
         eps=args.eps, R=args.R, inner_draws=args.rand_inner,
@@ -763,13 +835,50 @@ def main():
     # -----------------------------
     # Plots for analysis + PPT
     # -----------------------------
-    # 1) Top seat differences vs HH (barh)
+    # 1) Top seat differences vs HH (barh) - deterministic
     plot_diff_barh(states, ham - hh, "Hamilton vs HH (top differences)", figdir, "bar_hamilton_vs_hh", topk=20)
     plot_diff_barh(states, jef - hh, "Jefferson vs HH (top differences)", figdir, "bar_jefferson_vs_hh", topk=20)
     plot_diff_barh(states, web - hh, "Webster vs HH (top differences)", figdir, "bar_webster_vs_hh", topk=20)
     plot_diff_barh(states, hh_official - hh, "HH official vs HH (sanity check)", figdir, "bar_hhofficial_vs_hh", topk=20)
 
-    # 2) Heatmap of diffs (rows sorted by pop)
+    # 1b) Top seat differences vs HH (barh) - randomized one-run variants
+    plot_diff_barh(
+        states,
+        sys_one - hh,
+        "Systematic randomized (one run) vs HH (top differences)",
+        figdir,
+        "bar_rand_systematic_one_vs_hh",
+        topk=20,
+    )
+
+    plot_diff_barh(
+        states,
+        samp_one - hh,
+        "Sampford randomized (one run) vs HH (top differences)",
+        figdir,
+        "bar_rand_sampford_one_vs_hh",
+        topk=20,
+    )
+
+    plot_diff_barh(
+        states,
+        indep_one - hh,
+        "Independent randomized (one run) vs HH (top differences)",
+        figdir,
+        "bar_rand_independent_one_vs_hh",
+        topk=20,
+    )
+
+    plot_diff_barh(
+        states,
+        thomp_one - hh,
+        "Thompson-style randomized (one run) vs HH (top differences)",
+        figdir,
+        "bar_rand_thompson_one_vs_hh",
+        topk=20,
+    )
+
+    # 2) Heatmap of diffs (rows sorted by pop) for classical divisor vs HH
     diff_mat = np.stack([ham - hh, jef - hh, web - hh], axis=1)
     plot_diff_heatmap(states, pop, diff_mat, ["Hamilton", "Jefferson", "Webster"], figdir, "heatmap_diffs_vs_hh")
 
@@ -786,6 +895,7 @@ def main():
     plot_pop_vs_seat_error(pop, ham, args.house_size, args.min_seat, "Hamilton: seat error vs population", figdir, "scatter_err_hamilton")
     plot_pop_vs_seat_error(pop, jef, args.house_size, args.min_seat, "Jefferson: seat error vs population", figdir, "scatter_err_jefferson")
     plot_pop_vs_seat_error(pop, web, args.house_size, args.min_seat, "Webster: seat error vs population", figdir, "scatter_err_webster")
+    plot_pop_vs_seat_error(pop, hh, args.house_size, args.min_seat, "Huntington–Hill: seat error vs population", figdir, "scatter_err_hh")
 
     # 5) sensitivity flip histogram (deterministic)
     plot_sensitivity_hist(
@@ -800,7 +910,7 @@ def main():
         bins=25,
     )
 
-    # 6) randomized: top states by P(change from HH)
+    # 6) randomized: top states by P(change from HH) for systematic
     if "systematic_p_change_from_HHcomputed" in rand_stats.columns:
         plot_randomized_pchange(
             states,
