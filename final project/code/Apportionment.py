@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 Apportionment Project (US House, 2020 Census)
@@ -7,13 +6,9 @@ Apportionment Project (US House, 2020 Census)
 - Randomized quota rounding: systematic / Sampford / independent / Thompson-style
 - Metrics
 - Randomized summary (mean/std/p_change)
-- Sensitivity:
-    * deterministic: population noise -> seat flips vs baseline
-    * randomized:
-        (A) intrinsic randomness vs HH (population fixed)
-        (B) population-noise sensitivity of expected seats (mean over inner draws)
+- Sensitivity
 
-Plus: PPT-friendly plots (PDF+PNG, 16:9-ish) saved to outputs/figs/
+Plots saved to outputs/figs/
 
 Usage example:
   python Apportionment.py --xlsx apportionment-2020-table01.xlsx --eps 0.005 --R 2000 --seed 0
@@ -31,23 +26,13 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
-# -----------------------------
-# RNG helpers (avoid coupling inner/outer loops)
-# -----------------------------
 def make_rng(base_seed: int, *keys: int) -> np.random.Generator:
     ss = np.random.SeedSequence([base_seed, *keys])
     return np.random.default_rng(ss)
 
 
-# -----------------------------
 # Data loading
-# -----------------------------
 def load_us_2020_from_xlsx(xlsx_path: str) -> pd.DataFrame:
-    """
-    Parse the table where a row contains 'STATE' in the first column.
-    After that row, data rows contain: State | Population | Number of Representatives (HH official) | ...
-    Returns df columns: State, Population, HH_Seats_Official
-    """
     df_raw = pd.read_excel(xlsx_path, engine="openpyxl")
     col0 = df_raw.columns[0]
 
@@ -81,9 +66,7 @@ def load_us_2020_from_xlsx(xlsx_path: str) -> pd.DataFrame:
     return df
 
 
-# -----------------------------
 # Deterministic apportionment
-# -----------------------------
 def apportion_hamilton(pop: np.ndarray, house_size: int, min_seat: int = 1) -> np.ndarray:
     n = len(pop)
     seats = np.full(n, min_seat, dtype=int)
@@ -98,7 +81,7 @@ def apportion_hamilton(pop: np.ndarray, house_size: int, min_seat: int = 1) -> n
     left = remaining - int(base.sum())
     if left > 0:
         rema = quotas - np.floor(quotas)
-        # tie-break: larger remainder, then larger population, then lower index
+        # tie-breaker
         order = np.lexsort((np.arange(n), -pop, -rema))
         for i in order[:left]:
             seats[i] += 1
@@ -112,7 +95,7 @@ def apportion_priority(pop: np.ndarray, house_size: int, priority_fn, min_seat: 
     if remaining < 0:
         raise ValueError("house_size too small for min_seat constraint.")
 
-    # priority iteration (435 is small; O(n*435) is fine)
+    # priority iteration 
     for _ in range(remaining):
         priorities = priority_fn(pop, seats)
         idx = int(np.argmax(priorities))
@@ -134,15 +117,8 @@ def apportion_huntington_hill(pop: np.ndarray, house_size: int, min_seat: int = 
     return apportion_priority(pop, house_size, hh, min_seat=min_seat)
 
 
-# -----------------------------
 # Randomized rounding
-# -----------------------------
 def systematic_rounding(p: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
-    """
-    Systematic sampling / Grimmett rounding.
-    Input: p in [0,1), sum(p)=k (integer).
-    Output: x in {0,1}^n, sum(x)=k, E[x_i]=p_i.
-    """
     n = len(p)
     if k == 0:
         return np.zeros(n, dtype=int)
@@ -155,12 +131,11 @@ def systematic_rounding(p: np.ndarray, k: int, rng: np.random.Generator) -> np.n
     for i in range(n):
         a = u + cum
         b = a + float(p[i])
-        # integer exists in [a, b) iff ceil(a) < b
         if math.ceil(a - 1e-12) < b - 1e-12:
             x[i] = 1
         cum += float(p[i])
 
-    # Numerical guard: enforce exact k
+    # guard: enforce exact k
     s = int(x.sum())
     if s != k:
         scores = p.copy()
@@ -176,11 +151,6 @@ def systematic_rounding(p: np.ndarray, k: int, rng: np.random.Generator) -> np.n
 
 
 def sampford_rounding(p: np.ndarray, k: int, rng: np.random.Generator, max_tries: int = 2000) -> np.ndarray:
-    """
-    Sampford rounding (rejective procedure; can be slow when k is large-ish).
-    Input: p in [0,1), sum(p)=k
-    Output: x in {0,1}^n, sum(x)=k (falls back to systematic on too many rejections).
-    """
     n = len(p)
     if k == 0:
         return np.zeros(n, dtype=int)
@@ -217,12 +187,6 @@ def sampford_rounding(p: np.ndarray, k: int, rng: np.random.Generator, max_tries
 
 
 def independent_rounding(p: np.ndarray, k: int, rng: np.random.Generator, max_tries: int = 2000) -> np.ndarray:
-    """
-    Simple i.i.d. Bernoulli rounding with rejection:
-      - Sample x_i ~ Bernoulli(p_i) independently until sum(x) = k,
-        or fall back to greedy top-k by p_i.
-    This preserves E[sum x_i] = k and approximately preserves marginals.
-    """
     n = len(p)
     if k == 0:
         return np.zeros(n, dtype=int)
@@ -235,7 +199,7 @@ def independent_rounding(p: np.ndarray, k: int, rng: np.random.Generator, max_tr
         if s == k:
             return x
 
-    # Greedy fallback: choose top-k probabilities
+    # Greedy fallback
     idx = np.argsort(-p)
     x = np.zeros(n, dtype=int)
     x[idx[:k]] = 1
@@ -243,13 +207,6 @@ def independent_rounding(p: np.ndarray, k: int, rng: np.random.Generator, max_tr
 
 
 def thompson_rounding(p: np.ndarray, k: int, rng: np.random.Generator, prior_strength: float = 20.0) -> np.ndarray:
-    """
-    Thompson-style rounding:
-      - For each i, sample a Beta score with mean ~ p_i
-      - Give k 'successes' to the k largest scores.
-    This is a heuristic 'Thompson sampling' style rule; it preserves total = k,
-    and states with larger p_i are more likely to receive an extra seat.
-    """
     n = len(p)
     if k == 0:
         return np.zeros(n, dtype=int)
@@ -272,15 +229,6 @@ def apportion_randomized_quota(
     rng: np.random.Generator,
     min_seat: int = 1,
 ) -> np.ndarray:
-    """
-    Quota-based randomized apportionment:
-      1) give min_seat to all
-      2) compute remaining quotas q
-      3) give floors
-      4) distribute leftover seats by randomized rounding of residues
-
-    rounding ∈ {"systematic", "sampford", "independent", "thompson"}
-    """
     n = len(pop)
     seats = np.full(n, min_seat, dtype=int)
 
@@ -297,7 +245,7 @@ def apportion_randomized_quota(
     if k == 0:
         return seats
 
-    # renormalize residues to sum exactly k (float guard)
+    # renormalize residues to sum exactly k (float safeguarding here)
     s = float(residues.sum())
     if not np.isclose(s, k, atol=1e-9):
         residues = residues * (k / s)
@@ -319,9 +267,7 @@ def apportion_randomized_quota(
     return seats
 
 
-# -----------------------------
-# Metrics
-# -----------------------------
+# metrics
 @dataclass
 class Metrics:
     fairness_deviation: float
@@ -362,9 +308,8 @@ def compute_metrics(pop: np.ndarray, seats: np.ndarray, house_size: int, min_sea
     )
 
 
-# -----------------------------
 # Experiments
-# -----------------------------
+
 def sensitivity_experiment_deterministic(
     pop: np.ndarray,
     base_seats: np.ndarray,
@@ -376,10 +321,6 @@ def sensitivity_experiment_deterministic(
     desc: str,
     return_samples: bool = True,
 ) -> Tuple[Dict[str, float], Optional[np.ndarray]]:
-    """
-    Deterministic sensitivity: population noise -> flips vs baseline seats.
-    flips := 0.5*L1(seats2 - base_seats) (integer-valued in deterministic case)
-    """
     n = len(pop)
     rng = make_rng(seed, 111, hash(desc) % (2**31 - 1))
     flips = np.empty(R, dtype=float)
@@ -413,10 +354,6 @@ def intrinsic_randomness_vs_reference(
     desc: str,
     return_samples: bool = True,
 ) -> Tuple[Dict[str, float], Optional[np.ndarray]]:
-    """
-    Randomized (population fixed): draws -> flips vs a fixed reference (e.g., HH seats).
-    """
-    n = len(pop)
     rng = make_rng(seed, 222, hash(desc) % (2**31 - 1))
     flips = np.empty(draws, dtype=float)
     any_change = 0
@@ -445,7 +382,6 @@ def expected_seats(
     seed: int,
     desc: str,
 ) -> np.ndarray:
-    """Estimate E[seats] by Monte Carlo mean."""
     rng = make_rng(seed, 333, hash(desc) % (2**31 - 1))
     acc = np.zeros(len(pop), dtype=float)
     for _ in tqdm(range(draws), desc=desc, leave=False):
@@ -465,12 +401,6 @@ def sensitivity_randomized_expected(
     desc: str,
     return_samples: bool = True,
 ) -> Tuple[Dict[str, float], Optional[np.ndarray]]:
-    """
-    Randomized sensitivity to population noise, comparing EXPECTED seats:
-      - baseline mu0 = E[seats | pop]
-      - for each perturbation pop2: mu2 = E[seats | pop2]
-      - expected_flips = 0.5 * L1(mu2 - mu0)
-    """
     mu0 = expected_seats(
         pop, house_size, rounding,
         draws=inner_draws, min_seat=min_seat,
@@ -507,9 +437,7 @@ def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
 
-# -----------------------------
-# PPT-friendly plots
-# -----------------------------
+# plots
 def _save_fig(fig, outdir: str, name: str):
     os.makedirs(outdir, exist_ok=True)
     fig.savefig(os.path.join(outdir, f"{name}.pdf"), bbox_inches="tight")
@@ -620,9 +548,7 @@ def plot_randomized_pchange(states, p_change, outdir, name, topk=20, title="Rand
     _save_fig(fig, outdir, name)
 
 
-# -----------------------------
-# Main
-# -----------------------------
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--xlsx", type=str, default="apportionment-2020-table01.xlsx")
@@ -658,13 +584,13 @@ def main():
 
     print("\n=== Loaded states:", len(states), "| total pop:", int(pop.sum()), "===\n")
 
-    # --- deterministic seats ---
+    # deterministic seats
     ham = apportion_hamilton(pop, args.house_size, min_seat=args.min_seat)
     jef = apportion_jefferson(pop, args.house_size, min_seat=args.min_seat)
     web = apportion_webster(pop, args.house_size, min_seat=args.min_seat)
     hh = apportion_huntington_hill(pop, args.house_size, min_seat=args.min_seat)
 
-    # --- randomized (one draw for display) ---
+    # randomized (one draw, for display)
     rng_one = make_rng(args.seed, 999)
     sys_one = apportion_randomized_quota(pop, args.house_size, rounding="systematic", rng=rng_one, min_seat=args.min_seat)
     samp_one = apportion_randomized_quota(pop, args.house_size, rounding="sampford", rng=rng_one, min_seat=args.min_seat)
@@ -693,7 +619,7 @@ def main():
     out.to_csv(out_csv, index=False)
     print("Saved seat allocation table to:", out_csv)
 
-    # --- Metrics ---
+    # Metrics
     methods = {
         "HuntingtonHill": hh,
         "HH_official": hh_official,
@@ -725,7 +651,7 @@ def main():
     print("\n=== Metrics (sorted by FD) ===")
     print(metrics_df.to_string(index=False))
 
-    # --- Randomized summary (mean/std/p_change) ---
+    # Randomized summary (mean/std/p_change)
     def draw_many(rounding: str, draws: int, seed_key: int) -> pd.DataFrame:
         seats_mat = np.empty((draws, len(pop)), dtype=int)
         rng = make_rng(args.seed, 12345, seed_key)
@@ -774,6 +700,7 @@ def main():
         "HuntingtonHill": (hh, lambda P, S: apportion_huntington_hill(P, S, min_seat=args.min_seat)),
     }
 
+    # deterministic sensitivity
     for name, (base_seats, fn) in det.items():
         s, flips = sensitivity_experiment_deterministic(
             pop, base_seats, fn, args.house_size, args.eps, args.R, seed=args.seed,
@@ -782,42 +709,77 @@ def main():
         sens_rows.append({"method": name, **s})
         flip_samples[f"det_{name}"] = flips
 
-    # Randomized: (A) intrinsic randomness vs HH (systematic)
-    s_intr, flips_intr = intrinsic_randomness_vs_reference(
+    # Randomized: intrinsic randomness vs HH (systematic / independent / thompson)
+    s_intr_sys, flips_intr_sys = intrinsic_randomness_vs_reference(
         pop, hh, args.house_size, rounding="systematic",
         draws=args.intrinsic_draws, min_seat=args.min_seat, seed=args.seed,
         desc="Intrinsic randomness [systematic vs HH]", return_samples=True,
     )
-    sens_rows.append({"method": "Rand_systematic_intrinsic_vsHH", **s_intr})
-    flip_samples["rand_systematic_intrinsic_vsHH"] = flips_intr
+    sens_rows.append({"method": "Rand_systematic_intrinsic_vsHH", **s_intr_sys})
+    flip_samples["rand_systematic_intrinsic_vsHH"] = flips_intr_sys
 
-    # Randomized: (B) noise sensitivity of EXPECTED seats (systematic)
-    s_exp, flips_exp = sensitivity_randomized_expected(
+    s_intr_indep, flips_intr_indep = intrinsic_randomness_vs_reference(
+        pop, hh, args.house_size, rounding="independent",
+        draws=args.intrinsic_draws, min_seat=args.min_seat, seed=args.seed,
+        desc="Intrinsic randomness [independent vs HH]", return_samples=True,
+    )
+    sens_rows.append({"method": "Rand_independent_intrinsic_vsHH", **s_intr_indep})
+    flip_samples["rand_independent_intrinsic_vsHH"] = flips_intr_indep
+
+    s_intr_thomp, flips_intr_thomp = intrinsic_randomness_vs_reference(
+        pop, hh, args.house_size, rounding="thompson",
+        draws=args.intrinsic_draws, min_seat=args.min_seat, seed=args.seed,
+        desc="Intrinsic randomness [thompson vs HH]", return_samples=True,
+    )
+    sens_rows.append({"method": "Rand_thompson_intrinsic_vsHH", **s_intr_thomp})
+    flip_samples["rand_thompson_intrinsic_vsHH"] = flips_intr_thomp
+
+    # Randomized: noise sensitivity of expected seats (systematic / independent / thompson)
+    s_exp_sys, flips_exp_sys = sensitivity_randomized_expected(
         pop, args.house_size, rounding="systematic",
         eps=args.eps, R=args.R, inner_draws=args.rand_inner,
         min_seat=args.min_seat, seed=args.seed,
         desc="Sensitivity expected [systematic]", return_samples=True,
     )
-    sens_rows.append({"method": "Rand_systematic_noise_on_mean", **s_exp})
-    flip_samples["rand_systematic_noise_on_mean"] = flips_exp
+    sens_rows.append({"method": "Rand_systematic_noise_on_mean", **s_exp_sys})
+    flip_samples["rand_systematic_noise_on_mean"] = flips_exp_sys
 
+    s_exp_indep, flips_exp_indep = sensitivity_randomized_expected(
+        pop, args.house_size, rounding="independent",
+        eps=args.eps, R=args.R, inner_draws=args.rand_inner,
+        min_seat=args.min_seat, seed=args.seed,
+        desc="Sensitivity expected [independent]", return_samples=True,
+    )
+    sens_rows.append({"method": "Rand_independent_noise_on_mean", **s_exp_indep})
+    flip_samples["rand_independent_noise_on_mean"] = flips_exp_indep
+
+    s_exp_thomp, flips_exp_thomp = sensitivity_randomized_expected(
+        pop, args.house_size, rounding="thompson",
+        eps=args.eps, R=args.R, inner_draws=args.rand_inner,
+        min_seat=args.min_seat, seed=args.seed,
+        desc="Sensitivity expected [thompson]", return_samples=True,
+    )
+    sens_rows.append({"method": "Rand_thompson_noise_on_mean", **s_exp_thomp})
+    flip_samples["rand_thompson_noise_on_mean"] = flips_exp_thomp
+
+    # Sampford's sensitivity, run slow, need extra flag
     if args.do_sampford_sensitivity:
-        s_intr2, flips_intr2 = intrinsic_randomness_vs_reference(
+        s_intr_samp, flips_intr_samp = intrinsic_randomness_vs_reference(
             pop, hh, args.house_size, rounding="sampford",
             draws=min(args.intrinsic_draws, 500), min_seat=args.min_seat, seed=args.seed,
             desc="Intrinsic randomness [sampford vs HH]", return_samples=True,
         )
-        sens_rows.append({"method": "Rand_sampford_intrinsic_vsHH", **s_intr2})
-        flip_samples["rand_sampford_intrinsic_vsHH"] = flips_intr2
+        sens_rows.append({"method": "Rand_sampford_intrinsic_vsHH", **s_intr_samp})
+        flip_samples["rand_sampford_intrinsic_vsHH"] = flips_intr_samp
 
-        s_exp2, flips_exp2 = sensitivity_randomized_expected(
+        s_exp_samp, flips_exp_samp = sensitivity_randomized_expected(
             pop, args.house_size, rounding="sampford",
             eps=args.eps, R=min(args.R, 400), inner_draws=min(args.rand_inner, 100),
             min_seat=args.min_seat, seed=args.seed,
             desc="Sensitivity expected [sampford]", return_samples=True,
         )
-        sens_rows.append({"method": "Rand_sampford_noise_on_mean", **s_exp2})
-        flip_samples["rand_sampford_noise_on_mean"] = flips_exp2
+        sens_rows.append({"method": "Rand_sampford_noise_on_mean", **s_exp_samp})
+        flip_samples["rand_sampford_noise_on_mean"] = flips_exp_samp
     else:
         print("[Sensitivity] Skipping Sampford sensitivity (use --do_sampford_sensitivity to enable)")
 
@@ -832,16 +794,13 @@ def main():
         np.savez(npz_path, **{k: v for k, v in flip_samples.items() if v is not None})
         print("Saved flip samples to:", npz_path)
 
-    # -----------------------------
-    # Plots for analysis + PPT
-    # -----------------------------
-    # 1) Top seat differences vs HH (barh) - deterministic
+    # Top seat differences vs HH - deterministic
     plot_diff_barh(states, ham - hh, "Hamilton vs HH (top differences)", figdir, "bar_hamilton_vs_hh", topk=20)
     plot_diff_barh(states, jef - hh, "Jefferson vs HH (top differences)", figdir, "bar_jefferson_vs_hh", topk=20)
     plot_diff_barh(states, web - hh, "Webster vs HH (top differences)", figdir, "bar_webster_vs_hh", topk=20)
     plot_diff_barh(states, hh_official - hh, "HH official vs HH (sanity check)", figdir, "bar_hhofficial_vs_hh", topk=20)
 
-    # 1b) Top seat differences vs HH (barh) - randomized one-run variants
+    # Top seat differences vs HH  - randomized one-run variants
     plot_diff_barh(
         states,
         sys_one - hh,
@@ -878,7 +837,7 @@ def main():
         topk=20,
     )
 
-    # 2) Heatmap of diffs (rows sorted by pop) for classical divisor vs HH
+    # 2) Heatmap of diffs for classical divisor vs HH
     diff_mat = np.stack([ham - hh, jef - hh, web - hh], axis=1)
     plot_diff_heatmap(states, pop, diff_mat, ["Hamilton", "Jefferson", "Webster"], figdir, "heatmap_diffs_vs_hh")
 
@@ -910,7 +869,7 @@ def main():
         bins=25,
     )
 
-    # 6) randomized: top states by P(change from HH) for systematic
+    # 6) randomized: top states by P for systematic
     if "systematic_p_change_from_HHcomputed" in rand_stats.columns:
         plot_randomized_pchange(
             states,
@@ -920,6 +879,29 @@ def main():
             topk=20,
             title="Systematic randomized: P(seats != HH) (top 20 states)",
         )
+
+    # 7) randomized sensitivity histograms
+    plot_sensitivity_hist(
+        {
+            "sys_intrinsic": flip_samples.get("rand_systematic_intrinsic_vsHH"),
+            "indep_intrinsic": flip_samples.get("rand_independent_intrinsic_vsHH"),
+            "thomp_intrinsic": flip_samples.get("rand_thompson_intrinsic_vsHH"),
+        },
+        figdir,
+        "hist_sensitivity_randomized_intrinsic",
+        bins=25,
+    )
+
+    plot_sensitivity_hist(
+        {
+            "sys_mean_noise": flip_samples.get("rand_systematic_noise_on_mean"),
+            "indep_mean_noise": flip_samples.get("rand_independent_noise_on_mean"),
+            "thomp_mean_noise": flip_samples.get("rand_thompson_noise_on_mean"),
+        },
+        figdir,
+        "hist_sensitivity_randomized_mean",
+        bins=25,
+    )
 
     print("\nAll done. Outputs are in:", args.outdir)
     print("Figures for PPT/report are in:", figdir)
