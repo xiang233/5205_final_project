@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 
 """
-Apportionment Project (US House, 2020 Census)
-- Deterministic methods: Hamilton, Jefferson, Webster, Huntington–Hill (HH)
-- Randomized quota rounding: systematic / Sampford / independent / Thompson-style
-- Metrics
-- Randomized summary (mean/std/p_change)
-- Sensitivity
-
-Plots saved to outputs/figs/
-
 Usage example:
   python Apportionment.py --xlsx apportionment-2020-table01.xlsx --eps 0.005 --R 2000 --seed 0
 """
